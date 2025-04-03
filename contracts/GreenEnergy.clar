@@ -170,3 +170,170 @@
         (map-set credit-delegates tx-sender
             {delegate: delegate, amount: amount})
         (ok true)))
+
+
+;; Add to data maps
+(define-map account-ratings
+    principal 
+    {rating: uint, 
+     total-transactions: uint,
+     last-updated: uint})
+
+;; Add public function
+(define-public (update-account-rating (account principal) (new-rating uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= new-rating u100) (err u103))
+        (map-set account-ratings account
+            {rating: new-rating,
+             total-transactions: (+ (default-to u0 (get total-transactions (map-get? account-ratings account))) u1),
+             last-updated: stacks-block-height})
+        (ok true)))
+
+;; Add read-only function
+(define-read-only (get-account-rating (account principal))
+    (get rating (default-to {rating: u0, total-transactions: u0, last-updated: u0} 
+        (map-get? account-ratings account))))
+
+
+
+;; Add to data maps
+(define-map transfer-history
+    principal
+    {sent: (list 50 {amount: uint, recipient: principal, block: uint}),
+     received: (list 50 {amount: uint, sender: principal, block: uint})})
+
+;; Add private function
+(define-private (record-transfer (sender principal) (recipient principal) (amount uint))
+    (let 
+        ((sender-history (default-to {sent: (list), received: (list)} (map-get? transfer-history sender)))
+         (recipient-history (default-to {sent: (list), received: (list)} (map-get? transfer-history recipient))))
+        (map-set transfer-history sender
+            (merge sender-history 
+                {sent: (unwrap-panic (as-max-len? 
+                    (concat (list {amount: amount, recipient: recipient, block: stacks-block-height})
+                            (get sent sender-history)) u50))}))
+        (map-set transfer-history recipient
+            (merge recipient-history 
+                {received: (unwrap-panic (as-max-len? 
+                    (concat (list {amount: amount, sender: sender, block: stacks-block-height})
+                            (get received recipient-history)) u50))}))))
+
+;; Add read-only function
+(define-read-only (get-transfer-history (account principal))
+    (default-to {sent: (list), received: (list)} 
+        (map-get? transfer-history account)))
+
+
+
+
+    ;; Add to data vars
+    (define-data-var rewards-rate uint u5) ;; 5% rewards rate
+    
+    ;; Add to data maps
+    (define-map rewards-balances principal uint)
+    
+    ;; Add public function
+    (define-public (claim-rewards)
+        (let 
+            ((current-balance (get-credit-balance tx-sender))
+             (reward-amount (/ (* current-balance (var-get rewards-rate)) u100)))
+            (asserts! (> current-balance u0) err-insufficient-balance)
+            (map-set rewards-balances tx-sender 
+                (+ (default-to u0 (map-get? rewards-balances tx-sender)) reward-amount))
+            (ok reward-amount)))
+    
+    ;; Add read-only function
+    (define-read-only (get-rewards-balance (account principal))
+        (default-to u0 (map-get? rewards-balances account)))
+
+
+
+    ;; Add to data maps
+    (define-map credit-audits
+        uint
+        {auditor: principal,
+         findings: (string-ascii 100),
+         timestamp: uint,
+         status: (string-ascii 20)})
+    (define-data-var audit-counter uint u0)
+    
+    ;; Add public functions
+    (define-public (create-audit (findings (string-ascii 100)))
+        (let ((audit-id (+ (var-get audit-counter) u1)))
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (map-set credit-audits audit-id
+                {auditor: tx-sender,
+                 findings: findings,
+                 timestamp: stacks-block-height,
+                 status: "pending"})
+            (var-set audit-counter audit-id)
+            (ok audit-id)))
+    
+    (define-public (update-audit-status (audit-id uint) (new-status (string-ascii 20)))
+        (begin
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (map-set credit-audits audit-id
+                (merge (unwrap-panic (map-get? credit-audits audit-id))
+                    {status: new-status}))
+            (ok true)))      
+
+
+;; Add to data maps
+(define-map account-tiers
+    principal
+    {tier: (string-ascii 10),
+     benefits: uint,
+     updated-at: uint})
+
+;; Add public function
+(define-public (assign-account-tier (account principal) (tier (string-ascii 10)) (benefits uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set account-tiers account
+            {tier: tier,
+             benefits: benefits,
+             updated-at: stacks-block-height})
+        (ok true)))
+
+;; Add read-only function
+(define-read-only (get-account-tier (account principal))
+    (get tier (default-to 
+        {tier: "basic", benefits: u0, updated-at: u0} 
+        (map-get? account-tiers account))))
+
+
+;; Add to data maps
+(define-map credit-bundles
+    uint
+    {name: (string-ascii 50),
+     credits: uint,
+     price: uint,
+     available: bool})
+(define-data-var bundle-counter uint u0)
+
+;; Add public functions
+(define-public (create-bundle (name (string-ascii 50)) (credits uint) (price uint))
+    (let ((bundle-id (+ (var-get bundle-counter) u1)))
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set credit-bundles bundle-id
+            {name: name,
+             credits: credits,
+             price: price,
+             available: true})
+        (var-set bundle-counter bundle-id)
+        (ok bundle-id)))
+
+(define-public (purchase-bundle (bundle-id uint))
+    (let ((bundle (unwrap-panic (map-get? credit-bundles bundle-id))))
+        (asserts! (get available bundle) (err u104))
+        (map-set credit-balances tx-sender 
+            (+ (default-to u0 (map-get? credit-balances tx-sender)) 
+               (get credits bundle)))
+        (map-set credit-bundles bundle-id
+            (merge bundle {available: false}))
+        (ok true)))
+
+;; Add read-only function
+(define-read-only (get-bundle-info (bundle-id uint))
+    (map-get? credit-bundles bundle-id))
