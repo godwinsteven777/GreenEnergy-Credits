@@ -337,3 +337,72 @@
 ;; Add read-only function
 (define-read-only (get-bundle-info (bundle-id uint))
     (map-get? credit-bundles bundle-id))
+
+
+
+(define-map vesting-schedules
+    principal
+    {total-amount: uint,
+     release-rate: uint,
+     start-height: uint,
+     claimed-amount: uint})
+
+(define-public (create-vesting-schedule (recipient principal) (amount uint) (rate uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> amount u0) err-invalid-amount)
+        (map-set vesting-schedules recipient
+            {total-amount: amount,
+             release-rate: rate,
+             start-height: stacks-block-height,
+             claimed-amount: u0})
+        (ok true)))
+
+(define-public (claim-vested-credits)
+    (let ((schedule (unwrap! (map-get? vesting-schedules tx-sender) err-invalid-amount))
+          (claimable (/ (* (- stacks-block-height (get start-height schedule)) 
+                          (get release-rate schedule)) u100)))
+        (asserts! (< (get claimed-amount schedule) (get total-amount schedule)) 
+            err-insufficient-balance)
+        (map-set vesting-schedules tx-sender
+            (merge schedule 
+                {claimed-amount: (+ (get claimed-amount schedule) claimable)}))
+        (map-set credit-balances tx-sender 
+            (+ (default-to u0 (map-get? credit-balances tx-sender)) claimable))
+        (ok claimable)))
+
+
+
+(define-map market-orders
+    uint
+    {seller: principal,
+     initial-amount: uint,
+     remaining-amount: uint,
+     base-price: uint,
+     price-adjustment: uint})
+(define-data-var order-counter uint u0)
+
+(define-public (create-market-order (amount uint) (base-price uint) (price-adj uint))
+    (let ((order-id (+ (var-get order-counter) u1)))
+        (asserts! (>= (get-credit-balance tx-sender) amount) err-insufficient-balance)
+        (map-set market-orders order-id
+            {seller: tx-sender,
+             initial-amount: amount,
+             remaining-amount: amount,
+             base-price: base-price,
+             price-adjustment: price-adj})
+        (var-set order-counter order-id)
+        (ok order-id)))
+
+(define-public (buy-from-market-order (order-id uint) (amount uint))
+    (let ((order (unwrap! (map-get? market-orders order-id) err-invalid-amount))
+          (current-price (+ (get base-price order)
+                           (* (get price-adjustment order)
+                              (- (get initial-amount order) (get remaining-amount order))))))
+        (asserts! (>= (get remaining-amount order) amount) err-insufficient-balance)
+        (map-set market-orders order-id
+            (merge order 
+                {remaining-amount: (- (get remaining-amount order) amount)}))
+        (map-set credit-balances tx-sender 
+            (+ (default-to u0 (map-get? credit-balances tx-sender)) amount))
+        (ok current-price)))
