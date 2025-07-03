@@ -6,10 +6,17 @@
 (define-constant err-listing-not-found (err u103))
 (define-constant err-insufficient-payment (err u104))
 (define-constant err-cannot-buy-own-listing (err u105))
+(define-constant err-no-stake-found (err u106))
+(define-constant err-stake-locked (err u107))
+(define-constant min-stake-amount u10)
+(define-constant reward-rate u5)
+(define-constant stake-lock-period u144)
 
 ;; data vars
 (define-data-var total-credits uint u0)
 (define-data-var listing-counter uint u0)
+(define-data-var total-staked uint u0)
+(define-data-var rewards-pool uint u0)
 
 ;; data maps
 (define-map credit-balances principal uint)
@@ -23,6 +30,10 @@
     {seller: principal, amount: uint, price-per-credit: uint, active: bool}
 )
 (define-map user-listings principal (list 20 uint))
+(define-map staking-positions
+    principal
+    {staked-amount: uint, stake-time: uint, last-reward-claim: uint}
+)
 
 ;; public functions
 (define-public (mint-credits (amount uint) (recipient principal))
@@ -99,6 +110,73 @@
             (merge listing {active: false}))
         (ok true)))
 
+(define-public (stake-credits (amount uint))
+    (let (
+        (current-balance (get-credit-balance tx-sender))
+        (current-time stacks-block-height)
+        (existing-stake (map-get? staking-positions tx-sender))
+    )
+        (asserts! (>= amount min-stake-amount) err-invalid-amount)
+        (asserts! (>= current-balance amount) err-insufficient-balance)
+        (map-set credit-balances tx-sender (- current-balance amount))
+        (match existing-stake
+            existing-pos (map-set staking-positions tx-sender
+                {staked-amount: (+ (get staked-amount existing-pos) amount),
+                 stake-time: current-time,
+                 last-reward-claim: current-time})
+            (map-set staking-positions tx-sender
+                {staked-amount: amount,
+                 stake-time: current-time,
+                 last-reward-claim: current-time}))
+        (var-set total-staked (+ (var-get total-staked) amount))
+        (ok true)))
+
+(define-public (unstake-credits (amount uint))
+    (let (
+        (stake-info (unwrap! (map-get? staking-positions tx-sender) err-no-stake-found))
+        (staked-amount (get staked-amount stake-info))
+        (stake-time (get stake-time stake-info))
+        (current-time stacks-block-height)
+        (new-staked (- staked-amount amount))
+    )
+        (asserts! (> amount u0) err-invalid-amount)
+        (asserts! (>= staked-amount amount) err-insufficient-balance)
+        (asserts! (>= current-time (+ stake-time stake-lock-period)) err-stake-locked)
+        (map-set credit-balances tx-sender 
+            (+ (get-credit-balance tx-sender) amount))
+        (if (is-eq new-staked u0)
+            (map-delete staking-positions tx-sender)
+            (map-set staking-positions tx-sender
+                (merge stake-info {staked-amount: new-staked})))
+        (var-set total-staked (- (var-get total-staked) amount))
+        (ok true)))
+
+(define-public (claim-rewards)
+    (let (
+        (stake-info (unwrap! (map-get? staking-positions tx-sender) err-no-stake-found))
+        (staked-amount (get staked-amount stake-info))
+        (last-claim (get last-reward-claim stake-info))
+        (current-time stacks-block-height)
+        (time-diff (- current-time last-claim))
+        (rewards (* (/ (* staked-amount reward-rate) u100) time-diff))
+    )
+        (asserts! (> rewards u0) err-invalid-amount)
+        (map-set credit-balances tx-sender 
+            (+ (get-credit-balance tx-sender) rewards))
+        (map-set staking-positions tx-sender
+            (merge stake-info {last-reward-claim: current-time}))
+        (var-set total-credits (+ (var-get total-credits) rewards))
+        (ok rewards)))
+
+(define-public (fund-rewards-pool (amount uint))
+    (let ((owner-balance (get-credit-balance tx-sender)))
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> amount u0) err-invalid-amount)
+        (asserts! (>= owner-balance amount) err-insufficient-balance)
+        (map-set credit-balances tx-sender (- owner-balance amount))
+        (var-set rewards-pool (+ (var-get rewards-pool) amount))
+        (ok true)))
+
 ;; read only functions
 (define-read-only (get-credit-balance (account principal))
     (default-to u0 (map-get? credit-balances account)))
@@ -117,3 +195,30 @@
 
 (define-read-only (get-listing-counter)
     (var-get listing-counter))
+
+(define-read-only (get-staking-position (account principal))
+    (map-get? staking-positions account))
+
+(define-read-only (get-pending-rewards (account principal))
+    (match (map-get? staking-positions account)
+        stake-info (let (
+            (staked-amount (get staked-amount stake-info))
+            (last-claim (get last-reward-claim stake-info))
+            (current-time stacks-block-height)
+            (time-diff (- current-time last-claim))
+        )
+            (some (* (/ (* staked-amount reward-rate) u100) time-diff)))
+        none))
+
+(define-read-only (get-total-staked)
+    (var-get total-staked))
+
+(define-read-only (get-rewards-pool)
+    (var-get rewards-pool))
+
+(define-read-only (get-staking-info)
+    {total-staked: (var-get total-staked),
+     rewards-pool: (var-get rewards-pool),
+     min-stake: min-stake-amount,
+     reward-rate: reward-rate,
+     lock-period: stake-lock-period})
