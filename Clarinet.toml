@@ -9,6 +9,16 @@ requirements = []
 path = 'contracts/GreenEnergy.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.CreditVerification]
+path = 'contracts/CreditVerification.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.CreditRetirement]
+path = 'contracts/CreditRetirement.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
